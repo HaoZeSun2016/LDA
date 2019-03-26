@@ -65,6 +65,8 @@ class SEM(object):
         return cnt_changes / total_words
 
     def updata_param(self):
+        # M-step 一次采样估计，最大化theta和phi, 先验分布Dir(theta; alpha), Dir(phi; beta)
+        # 注意拉格朗日时s.t.\sum_k theta_ik = 1.0 and \sum_k phi_k = 1.0
         theta_new = self.gamma / np.sum(self.gamma, axis=1, keepdims=True)
         phi_new = self.delta / np.sum(self.delta, axis=1, keepdims=True)
         diff_theta = np.mean(np.abs(theta_new - self.theta) / (self.theta + 1e-6))
