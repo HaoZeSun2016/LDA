@@ -26,7 +26,7 @@ class Gibbs(object):
         self.K = K  # topic numbers
         self.V = V  # vocab
         self.alpha = np.ones([K], dtype=np.float) * 0.1
-        self.beta = np.ones([V], dtype=np.float) * 0.01
+        self.beta = np.ones([V], dtype=np.float) * 0.1
 
         self.gamma = np.zeros([self.M, self.K], dtype=np.float)  # 统计每个doc中属于各主题的词数
         self.delta = np.zeros([self.K, self.V], dtype=np.float)  # 统计每个主题下对应的不同词个数
@@ -51,8 +51,13 @@ class Gibbs(object):
 
     def gibbs_sampling(self):
         cnt_change = 0
-        for i, z_i in enumerate(self.Z):
-            for j in range(len(z_i)):
+        # 随机顺序 减少变量之间dependency
+        idx_i = range(self.M)
+        random.shuffle(idx_i)
+        for i in idx_i:
+            idx_j = range(len(self.Z[i]))
+            random.shuffle(idx_j)
+            for j in idx_j:
                 # 每步从统计量中先减去当前词对应的部分，计算相应的mcmc条件转义概率
                 current_topic = self.Z[i][j]
                 self.gamma[i, current_topic] -= 1.0
@@ -80,7 +85,7 @@ class Gibbs(object):
 
     def train(self, max_epoch, queue_size, threhold=1e-2):
         assert(queue_size >= 5 and max_epoch > queue_size * 2)
-        self.delta_queue, self.gamma_queue, tmp_theta, tmp_phi = [], [], 0.0, 0.0
+        self.delta_queue, self.gamma_queue, tmp_theta, tmp_phi = [], [], 1e-3, 1e-3
         for epoch in range(max_epoch):
             start = time.time()
             cnt_change = gbs.gibbs_sampling()
@@ -91,12 +96,10 @@ class Gibbs(object):
             self.delta_queue.append(copy.deepcopy(self.delta))
             self.gamma_queue.append(copy.deepcopy(self.gamma))
 
-            self.delta_avg = np.mean(np.asarray(self.delta_queue), axis=0)
-            self.gamma_avg = np.mean(np.asarray(self.gamma_queue), axis=0)
-            self.phi = self.delta_avg / np.sum(self.delta_avg, axis=1, keepdims=True)
+            self.phi = self.delta / np.sum(self.delta, axis=1, keepdims=True)
             self.theta = self.gamma / np.sum(self.gamma, axis=1, keepdims=True)
-            diff_theta = np.mean(np.abs(tmp_theta - self.theta) / (self.theta + 1e-6))
-            diff_phi = np.mean(np.abs(tmp_phi - self.phi) / (self.phi + 1e-6))
+            diff_theta = np.mean(np.abs(tmp_theta - self.theta) / (tmp_theta + 1e-6))
+            diff_phi = np.mean(np.abs(tmp_phi - self.phi) / (tmp_phi + 1e-6))
 
             tmp_theta = copy.deepcopy(self.theta)
             tmp_phi = copy.deepcopy(self.phi)
@@ -105,19 +108,27 @@ class Gibbs(object):
             if float(cnt_change) / float(self.total_words) < threhold:
                 break
 
+        self.delta_avg = np.mean(np.asarray(self.delta_queue), axis=0)
+        self.gamma_avg = np.mean(np.asarray(self.gamma_queue), axis=0)
+        self.phi = self.delta_avg / np.sum(self.delta_avg, axis=1, keepdims=True)
+        self.theta = self.gamma_avg / np.sum(self.gamma_avg, axis=1, keepdims=True)
+
 
     def predict_topic(self, doc, max_epoch, queue_size=10):
         assert (queue_size >= 5 and max_epoch > queue_size * 2)
         doc_z = copy.deepcopy(doc)
         doc_gamma = copy.deepcopy(self.alpha)  # 直接使用训练好的phi 不改动delta
-        gamma_queue, tmp_theta = [], 0.0
+        gamma_queue, tmp_theta = [], 1e-3
         for i, w in enumerate(doc):
             doc_z[i] = random.randint(0, self.K - 1)
             doc_gamma[doc_z[i]] += 1.0
 
         for epoch in range(max_epoch):
             start = time.time()
-            for j, current_topic in enumerate(doc_z):
+            idx_j = range(len(doc))
+            random.shuffle(idx_j)
+            for j in idx_j:
+                current_topic = doc_z[j]
                 doc_gamma[current_topic] -= 1.0
 
                 # transfer prob
@@ -136,14 +147,14 @@ class Gibbs(object):
             gamma_queue.append(copy.deepcopy(doc_gamma))
             gamma_avg = np.mean(np.asarray(gamma_queue), axis=0)
             theta = gamma_avg / np.sum(gamma_avg)
-            diff = np.mean(np.abs(tmp_theta - theta) / theta)
+            diff = np.mean(np.abs(tmp_theta - theta) / tmp_theta)
             tmp_theta = copy.deepcopy(theta)
             print("Inference Epoch %d, diff: %f, time: %f" % (epoch, diff, time.time() - start))
 
         return theta
 
 if __name__ == '__main__':
-    gbs = Gibbs(Gibbs.read_data('lda-small.txt', 2000), 20)
+    gbs = Gibbs(Gibbs.read_data('lda-small.txt', 2000), 50)
     gbs.train(400, 20)
     pkl.dump(gbs.phi, open('phi.pkl', 'wb'), protocol=2)
     train_theta = gbs.theta[0, :]

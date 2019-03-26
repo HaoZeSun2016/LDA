@@ -25,7 +25,7 @@ class SEM(object):
         self.K = K  # topic numbers
         self.V = V  # vocab
         self.alpha = np.ones([K], dtype=np.float) * 1.1
-        self.beta = np.ones([V], dtype=np.float) * 1.01
+        self.beta = np.ones([V], dtype=np.float) * 1.1
 
         #  随机初始化参数
         self.phi = np.exp(np.random.normal(0.0, 0.01, [self.K, self.V]))
@@ -47,10 +47,10 @@ class SEM(object):
         # 更新统计量，统计主题采样变化比例
         self.gamma = np.ones([self.M, self.K], dtype=np.float) * (self.alpha[None, :] - 1.0)
         self.delta = np.ones([self.K, self.V], dtype=np.float) * (self.beta[None, :] - 1.0)
-        cnt_changes, total_words = 0.0, 0.0
+        cnt_changes, total_words = 0, 0
         for i, doc in enumerate(self.W):
             for j, w_ij in enumerate(doc):
-                total_words += 1.0
+                total_words += 1
                 # p(Z_ij | W_ij, \theta_i, \phi_{Z_ij})
                 p_z_w = self.theta[i, :] * self.phi[:, w_ij] / self.p_w[i, w_ij]
                 # sample a z_ij
@@ -58,11 +58,11 @@ class SEM(object):
                 assert(abs(cum_p_z_w[-1] - 1.0) < 1e-4)
                 z_ij = np.sum(cum_p_z_w <= np.random.random_sample())  # int
                 if z_ij != self.Z[i][j]:
-                    cnt_changes += 1.0
+                    cnt_changes += 1
                 self.Z[i][j] = z_ij
                 self.gamma[i, z_ij] += 1.0
                 self.delta[z_ij, w_ij] += 1.0
-        return cnt_changes / total_words
+        return cnt_changes,  total_words
 
     def updata_param(self):
         # M-step 一次采样估计，最大化theta和phi, 先验分布Dir(theta; alpha), Dir(phi; beta)
@@ -75,20 +75,35 @@ class SEM(object):
         self.phi = phi_new
         return diff_theta, diff_phi
 
-    def train(self, max_epoch, threshold=1e-4):
+    def train(self, max_epoch, queue_size, threshold=1e-4):
+        assert (queue_size >= 3 and max_epoch > queue_size * 2)
+        phi_queue, theta_queue, flag = [], [], 0
         for epoch in range(max_epoch):
             start = time.time()
             self.get_p_w()
-            change_ratio = self.sample_z()
+            c, t = self.sample_z()
             diff_theta, diff_phi = self.updata_param()
-            print("Sampling Epoch %d, changes: %f, diff-theta: %f, diff-phi: %f, time: %f" %
-                  (epoch, change_ratio, diff_theta, diff_phi, time.time() - start))
-            if diff_phi < threshold:
+            if len(phi_queue) >= queue_size:
+                phi_queue.pop(0)
+                theta_queue.pop(0)
+            phi_queue.append(copy.deepcopy(self.phi))
+            theta_queue.append(copy.deepcopy(self.theta))
+            print("Sampling Epoch %d, changes: %d/%d, diff-theta: %f, diff-phi: %f, time: %f" %
+                  (epoch, c, t, diff_theta, diff_phi, time.time() - start))
+            if diff_phi < threshold and flag >= queue_size:
                 break
+            elif diff_phi < threshold:
+                flag += 1
+            else:
+                pass
+        self.phi = np.mean(np.asarray(phi_queue), axis=0)  # 采样-期望
+        self.theta = np.mean(np.asarray(theta_queue), axis=0)
 
-    def predict_topic(self, doc, max_epoch, threshold=1e-4):
+    def predict_topic(self, doc, max_epoch, queue_size, threshold=1e-4):
         # predict using exact inference using EM
         # 统计量由直接计数变为概率计数
+        assert (queue_size >= 3 and max_epoch > queue_size * 2)
+        theta_queue, flag = [], 0
         doc_theta = np.ones([self.K], dtype=np.float) / np.float(self.K)
         p_z_w = np.zeros([self.M, self.K], dtype=np.float)
         for epoch in range(max_epoch):
@@ -99,19 +114,28 @@ class SEM(object):
             doc_theta_new /= np.sum(doc_theta_new)
             diff = np.mean(np.abs(doc_theta_new - doc_theta) / (doc_theta + 1e-6))
             doc_theta = doc_theta_new
+            if len(theta_queue) >= queue_size:
+                theta_queue.pop(0)
+            theta_queue.append(copy.deepcopy(doc_theta))
             print("predict epoch: %d, diff: %f" % (epoch, diff))
-            if diff < threshold:
+            if diff < threshold and flag >= queue_size:
                 break
+            elif diff < threshold:
+                flag += 1
+            else:
+                pass
+        # 均值平滑
+        doc_theta = np.mean(np.asarray(theta_queue), axis=0)
         return doc_theta
 
 
 if __name__ == '__main__':
-    sem = SEM(SEM.read_data('lda-small.txt', 2000), 20)
-    sem.train(400)
+    sem = SEM(SEM.read_data('lda-small.txt', 2000), 50)
+    sem.train(400, 10)
     pkl.dump(sem.phi, open('phi.pkl', 'wb'), protocol=2)
 
     train_theta = sem.theta[0, :]
-    infer_theta = sem.predict_topic(sem.W[0], 100)
+    infer_theta = sem.predict_topic(sem.W[0], 100, 10)
     # check
     diff = np.max(np.abs(train_theta - infer_theta))
     print("check maximum diff: %f" % diff)
